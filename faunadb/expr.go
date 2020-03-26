@@ -1,6 +1,8 @@
 package faunadb
 
-import "encoding/json"
+import (
+	"encoding/json"
+)
 
 /*
 Expr is the base type for FaunaDB query language expressions.
@@ -22,15 +24,21 @@ custom data structures. For example:
 */
 type Expr interface {
 	expr() // Make sure only internal structures can be marked as valid expressions
+	String() string
 }
 
 type unescapedObj map[string]Expr
 type unescapedArr []Expr
 type invalidExpr struct{ err error }
 
-func (obj unescapedObj) expr() {}
-func (arr unescapedArr) expr() {}
-func (inv invalidExpr) expr()  {}
+func (obj unescapedObj) expr()          {}
+func (obj unescapedObj) String() string { byte, _ := json.Marshal(obj); return string(byte) }
+
+func (arr unescapedArr) expr()          {}
+func (arr unescapedArr) String() string { byte, _ := json.Marshal(arr); return string(byte) }
+
+func (inv invalidExpr) expr()          {}
+func (inv invalidExpr) String() string { byte, _ := inv.MarshalJSON(); return string(byte) }
 
 func (inv invalidExpr) MarshalJSON() ([]byte, error) {
 	return nil, inv.err
@@ -42,8 +50,11 @@ type Obj map[string]interface{}
 // Arr is a expression shortcut to represent any valid JSON array
 type Arr []interface{}
 
-func (obj Obj) expr() {}
-func (arr Arr) expr() {}
+func (obj Obj) expr()          {}
+func (obj Obj) String() string { byte, _ := obj.MarshalJSON(); return string(byte) }
+
+func (arr Arr) expr()          {}
+func (arr Arr) String() string { byte, _ := arr.MarshalJSON(); return string(byte) }
 
 // MarshalJSON implements json.Marshaler for Obj expression
 func (obj Obj) MarshalJSON() ([]byte, error) { return json.Marshal(wrap(obj)) }
