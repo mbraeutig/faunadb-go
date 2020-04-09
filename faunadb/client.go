@@ -44,6 +44,12 @@ func EnableTxnTimePassthrough() ClientConfig {
 	return func(cli *FaunaClient) { cli.isTxnTimeEnabled = true }
 }
 
+//TimeoutMs sets the server timeout for ALL queries initiated with this client.
+//This is not the http request timeout
+func TimeoutMs(millis uint64) ClientConfig {
+	return func(cli *FaunaClient) { cli.queryTimeoutMs = millis }
+}
+
 /*
 DisableTxnTimePassthrough configures the FaunaClient to not keep track of the last seen transaction time.
 The last seen transaction time is used to avoid reading stale data from outdated replicas when
@@ -54,6 +60,22 @@ doing leave this alone. Use at your own risk.
 */
 func DisableTxnTimePassthrough() ClientConfig {
 	return func(cli *FaunaClient) { cli.isTxnTimeEnabled = false }
+}
+
+//QueryConfig is the base type for query specific configuration parameters.
+type QueryConfig func(FaunaClient, *faunaRequest)
+
+//QueryTimeoutMS sets the server timeout for a specific query.
+//This is not the http request timeout
+func QueryTimeoutMS(millis uint64) QueryConfig {
+	return func(cli FaunaClient, req *faunaRequest) {
+		req.headers["X-Query-Timeout"] = strconv.FormatUint(millis, 10)
+	}
+}
+
+type faunaRequest struct {
+	expr    Expr
+	headers map[string]string
 }
 
 // ObserverCallback is the callback type for requests.
@@ -76,7 +98,9 @@ type FaunaClient struct {
 	http             *http.Client
 	isTxnTimeEnabled bool
 	lastTxnTime      int64
+	queryTimeoutMs   uint64
 	observer         ObserverCallback
+	headers          map[string]string
 }
 
 // QueryResult is a structure containing the result context for a given FaunaDB query.
@@ -116,6 +140,16 @@ func NewFaunaClient(secret string, configs ...ClientConfig) *FaunaClient {
 		client.observer = func(queryResult *QueryResult) {}
 	}
 
+	client.headers = map[string]string{
+		"Content-Type":          "application/json; charset=utf-8",
+		"X-FaunaDB-API-Version": apiVersion,
+		"X-Fauna-Driver":        headerFaunaDriver,
+	}
+
+	if client.queryTimeoutMs > 0 {
+		client.headers["X-Query-Timeout"] = strconv.FormatUint(client.queryTimeoutMs, 10)
+	}
+
 	return client
 }
 
@@ -138,9 +172,9 @@ func (client *FaunaClient) BatchQueryResult(expr []Expr) (value []Value, headers
 }
 
 // Query is the primary method used to send a query language expression to FaunaDB.
-func (client *FaunaClient) Query(expr Expr) (value Value, err error) {
+func (client *FaunaClient) Query(expr Expr, configs ...QueryConfig) (value Value, err error) {
 	startTime := time.Now()
-	response, err := client.performRequest(expr)
+	response, err := client.performRequest(expr, configs)
 
 	if response != nil {
 		defer func() {
@@ -186,6 +220,20 @@ func (client *FaunaClient) NewWithObserver(observer ObserverCallback) *FaunaClie
 	return client.newClient(client.basicAuth, observer)
 }
 
+// NewWithQueryTimeout creates a new FaunaClient with a specific observer callback. The returned client reuses its parent's internal http resources.
+func (client *FaunaClient) NewWithQueryTimeout(timeoutMs uint64) *FaunaClient {
+	return &FaunaClient{
+		basicAuth:        client.basicAuth,
+		endpoint:         client.endpoint,
+		headers:          client.headers,
+		http:             client.http,
+		isTxnTimeEnabled: client.isTxnTimeEnabled,
+		lastTxnTime:      client.lastTxnTime,
+		observer:         client.observer,
+		queryTimeoutMs:   timeoutMs,
+	}
+}
+
 // GetLastTxnTime gets the freshest timestamp reported to this client.
 func (client *FaunaClient) GetLastTxnTime() int64 {
 	if client.isTxnTimeEnabled {
@@ -215,33 +263,49 @@ func (client *FaunaClient) newClient(basicAuth string, observer ObserverCallback
 	return &FaunaClient{
 		basicAuth:        basicAuth,
 		endpoint:         client.endpoint,
+		headers:          client.headers,
 		http:             client.http,
 		isTxnTimeEnabled: client.isTxnTimeEnabled,
+		queryTimeoutMs:   client.queryTimeoutMs,
 		lastTxnTime:      client.lastTxnTime,
 		observer:         observer,
 	}
 }
 
-func (client *FaunaClient) performRequest(expr Expr) (response *http.Response, err error) {
-	var request *http.Request
+func (client *FaunaClient) performRequest(expr Expr, configs []QueryConfig) (response *http.Response, err error) {
 
-	if request, err = client.prepareRequest(expr); err == nil {
+	if request, err := client.prepareRequest(expr, configs); err == nil {
 		response, err = client.http.Do(request)
 	}
 
 	return
 }
 
-func (client *FaunaClient) prepareRequest(expr Expr) (request *http.Request, err error) {
+func (client *FaunaClient) prepareRequest(expr Expr, configs []QueryConfig) (request *http.Request, err error) {
 	var body []byte
 
 	if body, err = json.Marshal(expr); err == nil {
-		if request, err = http.NewRequest("POST", client.endpoint, bytes.NewReader(body)); err == nil {
-			request.Header.Add("Authorization", client.basicAuth)
-			request.Header.Add("Content-Type", "application/json; charset=utf-8")
-			request.Header.Add("X-FaunaDB-API-Version", apiVersion)
-			request.Header.Add("X-Fauna-Driver", headerFaunaDriver)
+		if request, err := http.NewRequest("POST", client.endpoint, bytes.NewReader(body)); err == nil {
+			headers := map[string]string{}
+
+			req := &faunaRequest{
+				expr:    expr,
+				headers: map[string]string{},
+			}
+
+			for _, config := range configs {
+				config(*client, req)
+			}
+			headers["Authorization"] = client.basicAuth
+			for k, v := range client.headers {
+				request.Header.Add(k, v)
+			}
+			for k, v := range headers {
+				request.Header.Add(k, v)
+			}
 			client.addLastTxnTimeHeader(request)
+
+			return request, nil
 		}
 	}
 
